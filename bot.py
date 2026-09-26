@@ -1,15 +1,18 @@
 import asyncio
 import csv
+import html
 import io
 import json
 import logging
 import os
+import random
+import string
 from datetime import datetime
 
 import aiohttp
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.client.default import DefaultBotProperties  # <-- Fix: Correct Import
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile
@@ -24,7 +27,6 @@ ADMIN_IDS = [
 ]
 PORT = int(os.getenv("PORT", 8080))
 
-# Bot instance with DefaultBotProperties
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -33,13 +35,13 @@ dp = Dispatcher()
 
 # ==================== LOGGING ====================
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
 logger = logging.getLogger(__name__)
 
 # ==================== LOCAL JSON DATABASE ====================
 DB_FILE = "database.json"
-
 
 def load_db():
     if os.path.exists(DB_FILE):
@@ -52,9 +54,11 @@ def load_db():
         "users": {},
         "banned": [],
         "warned": {},
-        "stats": {"total_emails_created": 0, "total_inbox_checks": 0},
+        "stats": {
+            "total_emails_created": 0,
+            "total_inbox_checks": 0
+        }
     }
-
 
 def save_db(data):
     try:
@@ -63,9 +67,9 @@ def save_db(data):
     except Exception as e:
         logger.error(f"Database Save Error: {e}")
 
-
 db = load_db()
 
+# User Sessions & Background Tasks
 user_mail_sessions = {}
 auto_refresh_tasks = {}
 
@@ -81,10 +85,10 @@ def register_user(user: types.User) -> bool:
             "joined": now,
             "emails_created": 0,
             "inbox_checks": 0,
-            "last_active": now,
+            "last_active": now
         }
         save_db(db)
-        return True
+        return True  # New User
     else:
         db["users"][uid]["last_active"] = now
         db["users"][uid]["first_name"] = user.first_name
@@ -92,14 +96,11 @@ def register_user(user: types.User) -> bool:
         save_db(db)
         return False
 
-
 def is_banned(user_id: int) -> bool:
     return user_id in db["banned"]
 
-
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
-
 
 # ==================== KEYBOARDS ====================
 def get_main_keyboard():
@@ -119,84 +120,181 @@ def get_main_keyboard():
         input_field_placeholder="Choose an option below...",
     )
 
+# ==================== ROBUST EMAIL ENGINE ====================
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://smailpro.com/",
+    "Origin": "https://smailpro.com"
+}
 
-# ==================== SMAILPRO API ====================
-async def smailpro_create_email():
-    url = "https://api.smailpro.com/v2/email/create?type=google"
+async def create_temporary_email():
+    """Generates temporary mail via Smailpro, with high-speed failover backup"""
+    # 1. Try Smailpro API
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=15)
-            ) as res:
+        url = "https://api.smailpro.com/v2/email/create?type=google"
+        async with aiohttp.ClientSession(headers=BROWSER_HEADERS) as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as res:
                 if res.status == 200:
                     data = await res.json()
-                    return data.get("address") or data.get("email")
+                    email = data.get("address") or data.get("email")
+                    if email:
+                        return {"email": email, "provider": "smailpro"}
     except Exception as e:
-        logger.error(f"Smailpro Create Error: {e}")
-    return None
+        logger.warning(f"Smailpro API attempt failed: {e}")
 
-
-async def smailpro_get_inbox(email: str):
-    url = f"https://api.smailpro.com/v2/email/inbox?email={email}"
+    # 2. Backup Provider: Mail.tm (Fast and always available)
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=15)
-            ) as res:
+            async with session.get("https://api.mail.tm/domains", timeout=aiohttp.ClientTimeout(total=8)) as res:
                 if res.status == 200:
-                    return await res.json()
+                    data = await res.json()
+                    domain = data["hydra:member"][0]["domain"]
+                    rand_user = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+                    rand_pass = "".join(random.choices(string.ascii_letters + string.digits, k=12))
+                    email = f"{rand_user}@{domain}"
+
+                    payload = {"address": email, "password": rand_pass}
+                    async with session.post("https://api.mail.tm/accounts", json=payload) as reg_res:
+                        if reg_res.status == 201:
+                            async with session.post("https://api.mail.tm/token", json=payload) as token_res:
+                                token_data = await token_res.json()
+                                return {
+                                    "email": email,
+                                    "token": token_data.get("token"),
+                                    "provider": "mailtm"
+                                }
     except Exception as e:
-        logger.error(f"Smailpro Inbox Error: {e}")
+        logger.error(f"Fallback Provider Error: {e}")
+
+    # 3. Backup Provider 2: 1secmail
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://www.1secmail.com/api/v1/?action=genRandomMailbox&count=1", timeout=aiohttp.ClientTimeout(total=8)) as res:
+                if res.status == 200:
+                    emails = await res.json()
+                    if emails:
+                        return {"email": emails[0], "provider": "1secmail"}
+    except Exception as e:
+        logger.error(f"1secmail Provider Error: {e}")
+
     return None
+
+
+async def fetch_inbox_messages(session_data: dict):
+    """Fetches incoming emails according to the provider"""
+    if not session_data:
+        return []
+
+    provider = session_data.get("provider", "smailpro")
+    email = session_data.get("email", "")
+
+    # Provider A: Smailpro
+    if provider == "smailpro":
+        try:
+            url = f"https://api.smailpro.com/v2/email/inbox?email={email}"
+            async with aiohttp.ClientSession(headers=BROWSER_HEADERS) as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as res:
+                    if res.status == 200:
+                        data = await res.json()
+                        return data.get("messages", [])
+        except Exception as e:
+            logger.error(f"Smailpro Inbox Error: {e}")
+        return []
+
+    # Provider B: Mail.tm
+    elif provider == "mailtm":
+        try:
+            token = session_data.get("token")
+            headers = {"Authorization": f"Bearer {token}"}
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.get("https://api.mail.tm/messages", timeout=aiohttp.ClientTimeout(total=8)) as res:
+                    if res.status == 200:
+                        data = await res.json()
+                        raw_list = data.get("hydra:member", [])
+                        messages = []
+                        for m in raw_list:
+                            msg_id = m.get("id")
+                            async with session.get(f"https://api.mail.tm/messages/{msg_id}") as detail_res:
+                                if detail_res.status == 200:
+                                    det = await detail_res.json()
+                                    messages.append({
+                                        "id": msg_id,
+                                        "from": det.get("from", {}).get("address", "Unknown"),
+                                        "subject": det.get("subject", "No Subject"),
+                                        "body": det.get("text") or det.get("intro", "No content")
+                                    })
+                        return messages
+        except Exception as e:
+            logger.error(f"Mailtm Inbox Error: {e}")
+        return []
+
+    # Provider C: 1secmail
+    elif provider == "1secmail":
+        try:
+            login, domain = email.split("@")
+            url = f"https://www.1secmail.com/api/v1/?action=getMessages&login={login}&domain={domain}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as res:
+                    if res.status == 200:
+                        raw_msgs = await res.json()
+                        messages = []
+                        for m in raw_msgs:
+                            msg_id = m.get("id")
+                            msg_url = f"https://www.1secmail.com/api/v1/?action=readMessage&login={login}&domain={domain}&id={msg_id}"
+                            async with session.get(msg_url) as d_res:
+                                if d_res.status == 200:
+                                    d = await d_res.json()
+                                    messages.append({
+                                        "id": str(msg_id),
+                                        "from": d.get("from", "Unknown"),
+                                        "subject": d.get("subject", "No Subject"),
+                                        "body": d.get("textBody") or d.get("body", "No content")
+                                    })
+                        return messages
+        except Exception as e:
+            logger.error(f"1secmail Inbox Error: {e}")
+        return []
+
+    return []
 
 
 # ==================== 30-SECOND AUTO REFRESH TASK ====================
 async def auto_refresh_inbox(user_id: int, chat_id: int):
     seen_ids = set()
-    logger.info(f"Started 30s auto-refresh for user {user_id}")
+    logger.info(f"Started 30-second auto-refresh loop for User {user_id}")
 
     while user_id in auto_refresh_tasks:
         session = user_mail_sessions.get(user_id)
         if not session:
             break
 
-        email = session.get("email")
-        if not email:
-            break
-
         try:
-            inbox_data = await smailpro_get_inbox(email)
-            messages = inbox_data.get("messages", []) if inbox_data else []
+            messages = await fetch_inbox_messages(session)
 
             for msg in messages:
-                msg_id = msg.get("id") or (
-                    msg.get("subject", "") + msg.get("from", "")
-                )
+                msg_id = str(msg.get("id") or (msg.get("subject", "") + msg.get("from", "")))
                 if msg_id not in seen_ids:
                     seen_ids.add(msg_id)
 
                     sender = msg.get("from", "Unknown")
                     subject = msg.get("subject", "No Subject")
-                    body = (
-                        msg.get("body")
-                        or msg.get("text")
-                        or "No content available."
-                    )
+                    body = msg.get("body") or msg.get("text") or "No content available."
 
                     msg_text = (
                         f"📩 <b>New Email Received!</b>\n\n"
-                        f"👤 <b>From:</b> <code>{sender}</code>\n"
-                        f"📌 <b>Subject:</b> {subject}\n\n"
-                        f"📝 <b>Content / OTP:</b>\n<code>{body}</code>\n\n"
+                        f"👤 <b>From:</b> <code>{html.escape(str(sender))}</code>\n"
+                        f"📌 <b>Subject:</b> {html.escape(str(subject))}\n\n"
+                        f"📝 <b>Content / OTP:</b>\n<code>{html.escape(str(body))}</code>\n\n"
                         f"🔄 <i>Auto-refreshing every 30 seconds...</i>"
                     )
                     await bot.send_message(chat_id, msg_text)
 
+                    # Update User Stats
                     uid = str(user_id)
                     if uid in db["users"]:
-                        db["users"][uid]["inbox_checks"] = (
-                            db["users"][uid].get("inbox_checks", 0) + 1
-                        )
+                        db["users"][uid]["inbox_checks"] = db["users"][uid].get("inbox_checks", 0) + 1
                         db["stats"]["total_inbox_checks"] += 1
                         save_db(db)
 
@@ -220,31 +318,31 @@ def stop_auto_refresh(user_id: int):
         logger.info(f"Stopped auto-refresh for user {user_id}")
 
 
-# ==================== BOT HANDLERS ====================
+# ==================== BOT USER COMMANDS & BUTTONS ====================
+
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
     user = message.from_user
 
     if is_banned(user.id):
-        await message.answer(
-            "🚫 <b>Access Denied:</b> You are banned from using this bot."
-        )
+        await message.answer("🚫 <b>Access Denied:</b> You are banned from using this bot.")
         return
 
     is_new = register_user(user)
-    user_mention = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
+    user_name_escaped = html.escape(user.first_name)
+    user_mention = f'<a href="tg://user?id={user.id}">{user_name_escaped}</a>'
 
     if is_new:
         text = (
             f"👋 <b>Welcome, {user_mention}!</b>\n\n"
-            f"Thank you for starting the <b>Smailpro Temp Mail Bot</b>! 🎉\n\n"
-            f"⚡ <b>Available Actions:</b>\n"
-            f"🟢 <b>Create New Mail</b> — Generate a fresh temporary Gmail\n"
-            f"🔵 <b>Check Inbox</b> — View incoming messages and OTPs\n"
-            f"🟡 <b>Current Mail</b> — Check your active address\n"
-            f"🔴 <b>Delete Session</b> — Discard your email & stop refresh\n\n"
-            f"⏱️ <i>Note: Once created, your inbox will automatically refresh every 30 seconds!</i>\n\n"
-            f"Tap any button below to get started 👇"
+            f"Thank you for starting the <b>Temp Mail Bot</b>! 🎉\n\n"
+            f"⚡ <b>Available Features:</b>\n"
+            f"🟢 <b>Create New Mail</b> — Generate a fresh temporary email\n"
+            f"🔵 <b>Check Inbox</b> — Read incoming emails & OTPs\n"
+            f"🟡 <b>Current Mail</b> — View your active email address\n"
+            f"🔴 <b>Delete Session</b> — Discard email & stop background refresh\n\n"
+            f"⏱️ <i>Note: Once created, your inbox is automatically checked every 30 seconds!</i>\n\n"
+            f"Tap a button below to get started 👇"
         )
     else:
         text = (
@@ -259,45 +357,43 @@ async def start_handler(message: types.Message):
 async def create_mail_handler(message: types.Message):
     user = message.from_user
     if is_banned(user.id):
-        await message.answer("🚫 You are banned.")
+        await message.answer("🚫 You are banned from using this bot.")
         return
 
     register_user(user)
-    status_msg = await message.answer(
-        "⏳ <i>Generating new Smailpro email address...</i>"
-    )
+    status_msg = await message.answer("⏳ <i>Generating new temporary email address...</i>")
 
-    email = await smailpro_create_email()
+    mail_data = await create_temporary_email()
 
-    if email:
+    if mail_data:
         stop_auto_refresh(user.id)
 
         user_mail_sessions[user.id] = {
-            "email": email,
-            "created_at": datetime.now().isoformat(),
+            "email": mail_data["email"],
+            "token": mail_data.get("token"),
+            "provider": mail_data.get("provider"),
+            "created_at": datetime.now().isoformat()
         }
+
+        email = mail_data["email"]
 
         uid = str(user.id)
         if uid in db["users"]:
-            db["users"][uid]["emails_created"] = (
-                db["users"][uid].get("emails_created", 0) + 1
-            )
+            db["users"][uid]["emails_created"] = db["users"][uid].get("emails_created", 0) + 1
             db["stats"]["total_emails_created"] += 1
             save_db(db)
 
         await status_msg.edit_text(
             f"✅ <b>Your Temporary Email is Ready:</b>\n\n"
             f"<code>{email}</code>\n\n"
-            f"📋 <i>Tap on the address above to copy it.</i>\n"
+            f"📋 <i>Tap the email above to copy it instantly.</i>\n"
             f"🔄 <b>Auto-Refresh Active:</b> Inbox is checked every 30 seconds automatically.\n\n"
             f"You can also tap 🔵 <b>Check Inbox</b> at any time."
         )
 
         start_auto_refresh(user.id, message.chat.id)
     else:
-        await status_msg.edit_text(
-            "❌ <b>Failed to generate email.</b> Please try again in a few seconds."
-        )
+        await status_msg.edit_text("❌ <b>Failed to generate email.</b> Please try again in a few seconds.")
 
 
 @dp.message(F.text == "🔵 Check Inbox")
@@ -310,23 +406,18 @@ async def check_inbox_handler(message: types.Message):
     session = user_mail_sessions.get(user.id)
 
     if not session:
-        await message.answer(
-            "⚠️ No active email session found.\nTap 🟢 <b>Create New Mail</b> first!"
-        )
+        await message.answer("⚠️ No active email session found.\nTap 🟢 <b>Create New Mail</b> first!")
         return
 
     email = session["email"]
-    status_msg = await message.answer(
-        f"🔍 <i>Checking inbox for:</i> <code>{email}</code>"
-    )
+    status_msg = await message.answer(f"🔍 <i>Checking inbox for:</i> <code>{email}</code>")
 
-    inbox_data = await smailpro_get_inbox(email)
-    messages = inbox_data.get("messages", []) if inbox_data else []
+    messages = await fetch_inbox_messages(session)
 
     if not messages:
         await status_msg.edit_text(
             f"📭 <b>Inbox is empty for:</b>\n<code>{email}</code>\n\n"
-            f"🔄 <i>Auto-refresh is running in background every 30s.</i>"
+            f"🔄 <i>Auto-refresh is active. New messages will pop up automatically.</i>"
         )
         return
 
@@ -338,9 +429,9 @@ async def check_inbox_handler(message: types.Message):
 
         await message.answer(
             f"📩 <b>Received Message:</b>\n\n"
-            f"👤 <b>From:</b> <code>{sender}</code>\n"
-            f"📌 <b>Subject:</b> {subject}\n\n"
-            f"📝 <b>Body / OTP / Link:</b>\n<code>{body}</code>"
+            f"👤 <b>From:</b> <code>{html.escape(str(sender))}</code>\n"
+            f"📌 <b>Subject:</b> {html.escape(str(subject))}\n\n"
+            f"📝 <b>Body / OTP / Link:</b>\n<code>{html.escape(str(body))}</code>"
         )
 
 
@@ -355,9 +446,7 @@ async def current_mail_handler(message: types.Message):
 
     if session:
         is_refreshing = user.id in auto_refresh_tasks
-        refresh_status = (
-            "🟢 Active (30s Interval)" if is_refreshing else "🔴 Stopped"
-        )
+        refresh_status = "🟢 Active (30s Interval)" if is_refreshing else "🔴 Stopped"
         await message.answer(
             f"ℹ️ <b>Active Session Details:</b>\n\n"
             f"📧 <b>Email:</b> <code>{session['email']}</code>\n"
@@ -365,9 +454,7 @@ async def current_mail_handler(message: types.Message):
             f"🔄 <b>Auto-Refresh:</b> {refresh_status}"
         )
     else:
-        await message.answer(
-            "⚠️ You do not have an active email.\nTap 🟢 <b>Create New Mail</b> to generate one."
-        )
+        await message.answer("⚠️ You do not have an active email.\nTap 🟢 <b>Create New Mail</b> to generate one.")
 
 
 @dp.message(F.text == "🔴 Delete Session")
@@ -379,14 +466,13 @@ async def delete_session_handler(message: types.Message):
 
     if user.id in user_mail_sessions:
         del user_mail_sessions[user.id]
-        await message.answer(
-            "🗑️ <b>Session deleted.</b> Auto-refresh has been stopped."
-        )
+        await message.answer("🗑️ <b>Session deleted.</b> Auto-refresh has been stopped.")
     else:
         await message.answer("⚠️ No active session to delete.")
 
 
 # ==================== ADMIN COMMANDS ====================
+
 @dp.message(Command("broadcast"))
 async def broadcast_handler(message: types.Message):
     if not is_admin(message.from_user.id):
@@ -394,22 +480,16 @@ async def broadcast_handler(message: types.Message):
 
     text = message.text.replace("/broadcast", "", 1).strip()
     if not text:
-        await message.answer(
-            "⚠️ Usage: <code>/broadcast Your text message here</code>"
-        )
+        await message.answer("⚠️ Usage: <code>/broadcast Your message text here</code>")
         return
 
     sent = 0
     failed = 0
-    status_msg = await message.answer(
-        "📢 <i>Broadcasting message to all users...</i>"
-    )
+    status_msg = await message.answer("📢 <i>Broadcasting message to all users...</i>")
 
     for uid in list(db["users"].keys()):
         try:
-            await bot.send_message(
-                int(uid), f"📢 <b>Announcement:</b>\n\n{text}"
-            )
+            await bot.send_message(int(uid), f"📢 <b>Announcement:</b>\n\n{text}")
             sent += 1
             await asyncio.sleep(0.05)
         except Exception:
@@ -439,9 +519,7 @@ async def ban_handler(message: types.Message):
             stop_auto_refresh(target_id)
             user_mail_sessions.pop(target_id, None)
             save_db(db)
-            await message.answer(
-                f"🚫 User <code>{target_id}</code> has been <b>banned</b>."
-            )
+            await message.answer(f"🚫 User <code>{target_id}</code> has been <b>banned</b>.")
         else:
             await message.answer("User is already banned.")
     except ValueError:
@@ -463,9 +541,7 @@ async def unban_handler(message: types.Message):
         if target_id in db["banned"]:
             db["banned"].remove(target_id)
             save_db(db)
-            await message.answer(
-                f"✅ User <code>{target_id}</code> has been <b>unbanned</b>."
-            )
+            await message.answer(f"✅ User <code>{target_id}</code> has been <b>unbanned</b>.")
         else:
             await message.answer("User is not currently banned.")
     except ValueError:
@@ -509,9 +585,7 @@ async def warn_handler(message: types.Message):
         warn_count = db["warned"][target_id_str]
         save_db(db)
 
-        await message.answer(
-            f"⚠️ User <code>{target_id_str}</code> warned. Total: <b>{warn_count}/3</b>"
-        )
+        await message.answer(f"⚠️ User <code>{target_id_str}</code> warned. Total: <b>{warn_count}/3</b>")
 
         if warn_count >= 3:
             if target_id_int not in db["banned"]:
@@ -519,23 +593,20 @@ async def warn_handler(message: types.Message):
                 stop_auto_refresh(target_id_int)
                 user_mail_sessions.pop(target_id_int, None)
                 save_db(db)
-                await message.answer(
-                    f"🚫 User <code>{target_id_str}</code> reached 3 warnings and was <b>auto-banned</b>."
-                )
+                await message.answer(f"🚫 User <code>{target_id_str}</code> reached 3 warnings and was <b>auto-banned</b>.")
 
         try:
             await bot.send_message(
                 target_id_int,
                 f"⚠️ <b>Warning Received!</b>\n"
                 f"You have received an administrative warning.\n"
-                f"Status: <b>{warn_count}/3</b> warnings.\n<i>(3 warnings lead to an automatic ban)</i>",
+                f"Status: <b>{warn_count}/3</b> warnings.\n<i>(3 warnings lead to an automatic ban)</i>"
             )
         except Exception:
             pass
 
     except ValueError:
         await message.answer("❌ Invalid User ID.")
-
 
 @dp.message(Command("unwarn"))
 async def unwarn_handler(message: types.Message):
@@ -551,9 +622,7 @@ async def unwarn_handler(message: types.Message):
     if target_id in db["warned"]:
         del db["warned"][target_id]
         save_db(db)
-        await message.answer(
-            f"✅ Cleared warnings for user <code>{target_id}</code>."
-        )
+        await message.answer(f"✅ Cleared warnings for user <code>{target_id}</code>.")
     else:
         await message.answer("User has no active warnings.")
 
@@ -599,11 +668,7 @@ async def topusers_handler(message: types.Message):
     if not is_admin(message.from_user.id):
         return
 
-    users = sorted(
-        db["users"].values(),
-        key=lambda x: x.get("emails_created", 0),
-        reverse=True,
-    )
+    users = sorted(db["users"].values(), key=lambda x: x.get("emails_created", 0), reverse=True)
     text = "🏆 <b>Top 10 Active Users:</b>\n\n"
 
     for i, u in enumerate(users[:10], 1):
@@ -655,62 +720,42 @@ async def export_handler(message: types.Message):
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(
-        [
-            "User ID",
-            "First Name",
-            "Username",
-            "Joined Date",
-            "Emails Created",
-            "Inbox Checks",
-            "Last Active",
-            "Banned",
-            "Warnings",
-        ]
-    )
+    writer.writerow(["User ID", "First Name", "Username", "Joined Date", "Emails Created", "Inbox Checks", "Last Active", "Banned", "Warnings"])
 
     for uid, u in db["users"].items():
-        writer.writerow(
-            [
-                uid,
-                u.get("first_name", ""),
-                u.get("username", ""),
-                u.get("joined", ""),
-                u.get("emails_created", 0),
-                u.get("inbox_checks", 0),
-                u.get("last_active", ""),
-                "Yes" if int(uid) in db["banned"] else "No",
-                db["warned"].get(uid, 0),
-            ]
-        )
+        writer.writerow([
+            uid,
+            u.get("first_name", ""),
+            u.get("username", ""),
+            u.get("joined", ""),
+            u.get("emails_created", 0),
+            u.get("inbox_checks", 0),
+            u.get("last_active", ""),
+            "Yes" if int(uid) in db["banned"] else "No",
+            db["warned"].get(uid, 0)
+        ])
 
     output.seek(0)
     csv_bytes = io.BytesIO(output.getvalue().encode("utf-8"))
-    filename = (
-        f"users_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    )
+    filename = f"users_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
     await message.answer_document(
         BufferedInputFile(csv_bytes.read(), filename=filename),
-        caption="📁 <b>User Database Export (CSV)</b>",
+        caption="📁 <b>User Database Export (CSV)</b>"
     )
 
 
 # ==================== AIOHTTP WEB SERVICE (Render Port Binding) ====================
 async def handle_home(request):
-    return web.json_response(
-        {
-            "status": "online",
-            "service": "Smailpro Telegram Bot",
-            "registered_users": len(db["users"]),
-            "active_sessions": len(user_mail_sessions),
-        }
-    )
-
+    return web.json_response({
+        "status": "online",
+        "service": "Temp Mail Bot",
+        "registered_users": len(db["users"]),
+        "active_sessions": len(user_mail_sessions)
+    })
 
 async def handle_health(request):
     return web.Response(text="OK", status=200)
-
 
 def init_web_app():
     web_app = web.Application()
@@ -718,11 +763,11 @@ def init_web_app():
     web_app.router.add_get("/health", handle_health)
     return web_app
 
+
 # ==================== MAIN RUNNER ====================
 async def main():
     logger.info(f"Starting Aiohttp Web Service on port {PORT}...")
 
-    # 1. Start HTTP Server for Render port binding
     web_app = init_web_app()
     runner = web.AppRunner(web_app)
     await runner.setup()
@@ -732,7 +777,6 @@ async def main():
     logger.info(f"Web server online on 0.0.0.0:{PORT}")
     logger.info("Starting Telegram Bot Long-Polling...")
 
-    # 2. Start Bot Polling
     try:
         await dp.start_polling(bot)
     finally:

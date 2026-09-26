@@ -218,7 +218,7 @@ async def smailpro_check_inbox(session_data: dict):
                 continue
 
     return []
-    # ==================== 30-SEC AUTO REFRESH ====================
+   # ==================== 30-SEC AUTO REFRESH LOOP ====================
 async def auto_refresh_inbox(user_id: int, chat_id: int):
     seen_ids = set()
     logger.info(f"Auto-refresh started for user {user_id}")
@@ -240,20 +240,20 @@ async def auto_refresh_inbox(user_id: int, chat_id: int):
                     subject = msg.get("subject", "No Subject")
                     body = msg.get("body") or msg.get("text") or "No content available."
 
-                    # Extract clickable links from body
+                    # Clickable links extract karna
                     urls = extract_urls(body)
 
-                    # Build message WITHOUT mono/code on links
+                    # Message Body (HTML Escaped)
                     msg_text = (
-                        f"📩 <b>New Email Received!</b>\n\n"
+                        f"📩 <b>New Gmail Received!</b>\n\n"
                         f"👤 <b>From:</b> {html.escape(str(sender))}\n"
                         f"📌 <b>Subject:</b> {html.escape(str(subject))}\n\n"
                         f"📝 <b>Content:</b>\n{html.escape(str(body))}"
                     )
 
-                    # Send links separately as plain clickable URLs (no mono)
+                    # Links ko bina mono ke plain clickable URL banana
                     if urls:
-                        links_text = "\n\n🔗 <b>Links Found:</b>\n"
+                        links_text = "\n\n🔗 <b>Links:</b>\n"
                         for i, url in enumerate(urls, 1):
                             links_text += f"\n{i}. {url}"
                         msg_text += links_text
@@ -272,7 +272,7 @@ async def auto_refresh_inbox(user_id: int, chat_id: int):
                         save_db(db)
 
         except Exception as e:
-            logger.error(f"Auto-refresh error for {user_id}: {e}")
+            logger.error(f"Auto-refresh loop error for {user_id}: {e}")
 
         await asyncio.sleep(30)
 
@@ -291,7 +291,7 @@ def stop_auto_refresh(user_id: int):
         logger.info(f"Stopped auto-refresh for user {user_id}")
 
 
-# ==================== USER COMMANDS ====================
+# ==================== BOT USER COMMANDS ====================
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
@@ -306,19 +306,19 @@ async def start_handler(message: types.Message):
     if is_new:
         text = (
             f"👋 <b>Welcome, {mention}!</b>\n\n"
-            f"Thank you for starting the <b>Smailpro Temp Mail Bot</b>! 🎉\n\n"
+            f"Thank you for starting the <b>Smailpro Gmail Bot</b>! 🎉\n\n"
             f"⚡ <b>Available Actions:</b>\n"
-            f"🟢 <b>Create New Mail</b> — Generate a fresh temporary Gmail\n"
-            f"🔵 <b>Check Inbox</b> — Read incoming emails and OTPs\n"
-            f"🟡 <b>Current Mail</b> — View your active email address\n"
-            f"🔴 <b>Delete Session</b> — Discard email and stop refresh\n\n"
-            f"⏱️ <i>Once created, inbox auto-refreshes every 30 seconds!</i>\n\n"
+            f"🟢 <b>Create New Mail</b> — Generate a fresh @gmail.com address\n"
+            f"🔵 <b>Check Inbox</b> — Read incoming emails & OTPs\n"
+            f"🟡 <b>Current Mail</b> — View your active Gmail address\n"
+            f"🔴 <b>Delete Session</b> — Discard email & stop background refresh\n\n"
+            f"⏱️ <i>Note: Once created, inbox auto-refreshes every 30 seconds!</i>\n\n"
             f"Tap a button below to get started 👇"
         )
     else:
         text = (
             f"👋 <b>Welcome back, {mention}!</b>\n\n"
-            f"Use the buttons below to manage your temporary mail 👇"
+            f"Use the buttons below to manage your temporary Gmail 👇"
         )
 
     await message.answer(text, reply_markup=get_main_keyboard())
@@ -328,21 +328,20 @@ async def start_handler(message: types.Message):
 async def create_mail_handler(message: types.Message):
     user = message.from_user
     if is_banned(user.id):
-        await message.answer("🚫 You are banned.")
+        await message.answer("🚫 You are banned from using this bot.")
         return
 
     register_user(user)
-    status_msg = await message.answer("⏳ <i>Generating new Smailpro email...</i>")
+    status_msg = await message.answer("⏳ <i>Generating fresh @gmail.com address from Smailpro...</i>")
 
-    mail_data = await smailpro_create_fresh()
+    mail_data = await smailpro_create_gmail()
 
     if mail_data:
         stop_auto_refresh(user.id)
 
         user_mail_sessions[user.id] = {
             "email": mail_data["email"],
-            "token": mail_data.get("token"),
-            "provider": mail_data.get("provider"),
+            "provider": "smailpro",
             "cookies": mail_data.get("cookies", {}),
             "created_at": datetime.now().isoformat()
         }
@@ -356,17 +355,17 @@ async def create_mail_handler(message: types.Message):
             save_db(db)
 
         await status_msg.edit_text(
-            f"✅ <b>Your Smailpro Email is Ready:</b>\n\n"
+            f"✅ <b>Your Smailpro Gmail is Ready:</b>\n\n"
             f"<code>{email}</code>\n\n"
-            f"📋 <i>Tap the email above to copy.</i>\n"
-            f"🔄 <b>Auto-Refresh Active:</b> Checking every 30 seconds.\n"
-            f"♾️ <b>Unlimited:</b> Create as many as you want!\n\n"
-            f"Tap 🔵 <b>Check Inbox</b> anytime."
+            f"📋 <i>Tap the email above to copy it.</i>\n"
+            f"🔄 <b>Auto-Refresh Active:</b> Checking every 30 seconds automatically.\n"
+            f"♾️ <b>Unlimited:</b> Fresh session used (no limit lock)!\n\n"
+            f"You can also tap 🔵 <b>Check Inbox</b> anytime."
         )
 
         start_auto_refresh(user.id, message.chat.id)
     else:
-        await status_msg.edit_text("❌ <b>Failed to generate email.</b> Try again in a few seconds.")
+        await status_msg.edit_text("❌ <b>Failed to generate Gmail.</b> Smailpro server busy, please try again in a few seconds.")
 
 
 @dp.message(F.text == "🔵 Check Inbox")
@@ -390,7 +389,7 @@ async def check_inbox_handler(message: types.Message):
     if not messages:
         await status_msg.edit_text(
             f"📭 <b>Inbox is empty for:</b>\n<code>{email}</code>\n\n"
-            f"🔄 <i>Auto-refresh running every 30s.</i>"
+            f"🔄 <i>Auto-refresh is running every 30 seconds.</i>"
         )
         return
 
@@ -654,18 +653,27 @@ async def export_handler(message: types.Message):
     w = csv.writer(output)
     w.writerow(["User ID", "Name", "Username", "Joined", "Emails", "Checks", "Last Active", "Banned", "Warnings"])
     for uid, u in db["users"].items():
-        w.writerow([uid, u.get("first_name", ""), u.get("username", ""), u.get("joined", ""), u.get("emails_created", 0), u.get("inbox_checks", 0), u.get("last_active", ""), "Yes" if int(uid) in db["banned"] else "No", db["warned"].get(uid, 0)])
+        w.writerow([
+            uid, u.get("first_name", ""), u.get("username", ""),
+            u.get("joined", ""), u.get("emails_created", 0),
+            u.get("inbox_checks", 0), u.get("last_active", ""),
+            "Yes" if int(uid) in db["banned"] else "No",
+            db["warned"].get(uid, 0)
+        ])
     output.seek(0)
     buf = io.BytesIO(output.getvalue().encode("utf-8"))
     buf.name = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    await message.answer_document(BufferedInputFile(buf.read(), filename=buf.name), caption="📁 <b>User Export (CSV)</b>")
+    await message.answer_document(
+        BufferedInputFile(buf.read(), filename=buf.name),
+        caption="📁 <b>User Export (CSV)</b>"
+    )
 
 
-# ==================== WEB SERVER ====================
+# ==================== WEB SERVER (Render Port Binding) ====================
 async def handle_home(request):
     return web.json_response({
         "status": "online",
-        "service": "Smailpro Bot",
+        "service": "Smailpro Gmail Bot",
         "users": len(db["users"]),
         "sessions": len(user_mail_sessions)
     })
@@ -697,4 +705,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())    
+    asyncio.run(main()) 

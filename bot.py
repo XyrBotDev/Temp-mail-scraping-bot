@@ -40,7 +40,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== DATABASE ====================
+# ==================== LOCAL DATABASE ====================
 DB_FILE = "database.json"
 
 def load_db():
@@ -98,7 +98,7 @@ def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
 
 def extract_urls(text: str) -> list:
-    """Extract all clickable URLs from email body"""
+    """Email body se clickable links nikalne ke liye"""
     if not text:
         return []
     pattern = r'https?://[^\s<>"\')\]\},]+'
@@ -123,7 +123,7 @@ def get_main_keyboard():
         input_field_placeholder="Choose an option below...",
     )
 
-# ==================== SMAILPRO ENGINE ====================
+# ==================== STRICT SMAILPRO GMAIL ENGINE ====================
 SMAILPRO_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
@@ -138,133 +138,85 @@ SMAILPRO_HEADERS = {
     "Sec-Fetch-Site": "same-site"
 }
 
-async def smailpro_create_fresh():
-    """Creates a NEW cookie session every single time to bypass limits"""
+async def smailpro_create_gmail():
+    """Strictly creates @gmail.com addresses from Smailpro Option 1"""
     jar = aiohttp.CookieJar(unsafe=True)
     timeout = aiohttp.ClientTimeout(total=15)
 
     async with aiohttp.ClientSession(
         cookie_jar=jar, headers=SMAILPRO_HEADERS, timeout=timeout
     ) as session:
+        # Step 1: Fresh web session initialization
         try:
             async with session.get("https://smailpro.com/temporary-email") as page:
                 await page.read()
         except Exception as e:
-            logger.warning(f"Page visit failed: {e}")
+            logger.warning(f"Smailpro handshake warning: {e}")
 
-        endpoints = [
+        # Step 2: Strict Gmail Option Endpoints (type=google / gmail)
+        gmail_endpoints = [
+            "https://api.smailpro.com/v2/client/create?type=google&server=google",
+            "https://api.smailpro.com/v2/email/create?type=google&server=google",
             "https://api.smailpro.com/v2/client/create?type=google",
             "https://api.smailpro.com/v2/email/create?type=google",
-            "https://api.smailpro.com/v2/client/create?type=default",
-            "https://api.smailpro.com/v2/email/create?type=default",
+            "https://api.smailpro.com/v2/client/create?type=gmail",
+            "https://api.smailpro.com/v2/email/create?type=gmail"
         ]
 
-        for url in endpoints:
+        for url in gmail_endpoints:
             try:
                 async with session.get(url) as res:
                     if res.status == 200:
                         data = await res.json()
                         email = data.get("address") or data.get("email")
-                        if email and "@" in email:
+                        # Validate that it is strictly a Gmail address
+                        if email and ("@gmail.com" in email or "@googlemail.com" in email):
                             cookies = {c.key: c.value for c in jar}
-                            logger.info(f"Smailpro email created: {email}")
+                            logger.info(f"Smailpro GMAIL Created Successfully: {email}")
                             return {
                                 "email": email,
                                 "provider": "smailpro",
                                 "cookies": cookies
                             }
             except Exception as err:
-                logger.debug(f"Endpoint {url} failed: {err}")
+                logger.debug(f"Gmail endpoint {url} failed: {err}")
                 continue
 
-    # Fallback to Mail.tm
-    try:
-        logger.info("Smailpro unavailable, using backup engine...")
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get("https://api.mail.tm/domains") as res:
-                if res.status == 200:
-                    data = await res.json()
-                    domain = data["hydra:member"][0]["domain"]
-                    rand_u = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
-                    rand_p = "".join(random.choices(string.ascii_letters + string.digits, k=12))
-                    email = f"{rand_u}@{domain}"
-                    payload = {"address": email, "password": rand_p}
-
-                    async with session.post("https://api.mail.tm/accounts", json=payload) as reg:
-                        if reg.status == 201:
-                            async with session.post("https://api.mail.tm/token", json=payload) as tok:
-                                tok_data = await tok.json()
-                                return {
-                                    "email": email,
-                                    "token": tok_data.get("token"),
-                                    "provider": "mailtm",
-                                    "cookies": {}
-                                }
-    except Exception as e:
-        logger.error(f"Fallback error: {e}")
     return None
 
 
 async def smailpro_check_inbox(session_data: dict):
-    """Checks inbox using stored cookies"""
+    """Checks inbox for incoming Gmail OTPs/Messages using session cookies"""
     if not session_data:
         return []
 
-    provider = session_data.get("provider", "smailpro")
     email = session_data.get("email", "")
+    stored_cookies = session_data.get("cookies", {})
+    jar = aiohttp.CookieJar(unsafe=True)
     timeout = aiohttp.ClientTimeout(total=10)
 
-    if provider == "smailpro":
-        stored_cookies = session_data.get("cookies", {})
-        jar = aiohttp.CookieJar(unsafe=True)
+    async with aiohttp.ClientSession(
+        cookie_jar=jar, headers=SMAILPRO_HEADERS, timeout=timeout
+    ) as session:
+        for key, val in stored_cookies.items():
+            jar.update_cookies({key: val})
 
-        async with aiohttp.ClientSession(
-            cookie_jar=jar, headers=SMAILPRO_HEADERS, timeout=timeout
-        ) as session:
-            for key, val in stored_cookies.items():
-                jar.update_cookies({key: val})
+        inbox_urls = [
+            f"https://api.smailpro.com/v2/client/inbox?email={email}",
+            f"https://api.smailpro.com/v2/email/inbox?email={email}",
+        ]
 
-            inbox_urls = [
-                f"https://api.smailpro.com/v2/client/inbox?email={email}",
-                f"https://api.smailpro.com/v2/email/inbox?email={email}",
-            ]
-
-            for url in inbox_urls:
-                try:
-                    async with session.get(url) as res:
-                        if res.status == 200:
-                            data = await res.json()
-                            msgs = data.get("messages", [])
-                            if isinstance(msgs, list) and len(msgs) > 0:
-                                return msgs
-                except Exception:
-                    continue
-        return []
-
-    elif provider == "mailtm":
-        try:
-            token = session_data.get("token")
-            headers = {"Authorization": f"Bearer {token}"}
-            async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-                async with session.get("https://api.mail.tm/messages") as res:
+        for url in inbox_urls:
+            try:
+                async with session.get(url) as res:
                     if res.status == 200:
                         data = await res.json()
-                        raw = data.get("hydra:member", [])
-                        messages = []
-                        for m in raw:
-                            mid = m.get("id")
-                            async with session.get(f"https://api.mail.tm/messages/{mid}") as det_res:
-                                if det_res.status == 200:
-                                    det = await det_res.json()
-                                    messages.append({
-                                        "id": mid,
-                                        "from": det.get("from", {}).get("address", "Unknown"),
-                                        "subject": det.get("subject", "No Subject"),
-                                        "body": det.get("text") or det.get("intro", "No content")
-                                    })
-                        return messages
-        except Exception as e:
-            logger.error(f"Mailtm inbox error: {e}")
+                        msgs = data.get("messages", [])
+                        if isinstance(msgs, list):
+                            return msgs
+            except Exception:
+                continue
+
     return []
     # ==================== 30-SEC AUTO REFRESH ====================
 async def auto_refresh_inbox(user_id: int, chat_id: int):

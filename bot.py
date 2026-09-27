@@ -8,6 +8,7 @@ import os
 import random
 import re
 import string
+from urllib.parse import unquote
 from datetime import datetime
 
 import aiohttp
@@ -98,7 +99,7 @@ def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
 
 def extract_urls(text: str) -> list:
-    """Email body se clickable links nikalne ke liye"""
+    """Email body se clickable links extract karne ke liye"""
     if not text:
         return []
     pattern = r'https?://[^\s<>"\')\]\},]+'
@@ -123,102 +124,170 @@ def get_main_keyboard():
         input_field_placeholder="Choose an option below...",
     )
 
-# ==================== STRICT SMAILPRO GMAIL ENGINE ====================
-SMAILPRO_HEADERS = {
+# ==================== STRICT @GMAIL.COM ENGINE ====================
+BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://smailpro.com/temporary-email",
     "Origin": "https://smailpro.com",
-    "Sec-Ch-Ua": '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="99"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-site"
+    "Referer": "https://smailpro.com/temporary-email"
 }
 
-async def smailpro_create_gmail():
-    """Strictly creates @gmail.com addresses from Smailpro Option 1"""
-    jar = aiohttp.CookieJar(unsafe=True)
+async def master_create_gmail():
+    """Generates authentic @gmail.com using Dual-Engine (Smailpro + Emailnator)"""
     timeout = aiohttp.ClientTimeout(total=15)
 
-    async with aiohttp.ClientSession(
-        cookie_jar=jar, headers=SMAILPRO_HEADERS, timeout=timeout
-    ) as session:
-        # Step 1: Fresh web session initialization
-        try:
-            async with session.get("https://smailpro.com/temporary-email") as page:
-                await page.read()
-        except Exception as e:
-            logger.warning(f"Smailpro handshake warning: {e}")
-
-        # Step 2: Strict Gmail Option Endpoints (type=google / gmail)
-        gmail_endpoints = [
-            "https://api.smailpro.com/v2/client/create?type=google&server=google",
-            "https://api.smailpro.com/v2/email/create?type=google&server=google",
-            "https://api.smailpro.com/v2/client/create?type=google",
-            "https://api.smailpro.com/v2/email/create?type=google",
-            "https://api.smailpro.com/v2/client/create?type=gmail",
-            "https://api.smailpro.com/v2/email/create?type=gmail"
-        ]
-
-        for url in gmail_endpoints:
+    # --- ENGINE 1: Smailpro Gmail ---
+    try:
+        jar = aiohttp.CookieJar(unsafe=True)
+        async with aiohttp.ClientSession(cookie_jar=jar, headers=BROWSER_HEADERS, timeout=timeout) as session:
             try:
-                async with session.get(url) as res:
-                    if res.status == 200:
-                        data = await res.json()
-                        email = data.get("address") or data.get("email")
-                        # Validate that it is strictly a Gmail address
-                        if email and ("@gmail.com" in email or "@googlemail.com" in email):
-                            cookies = {c.key: c.value for c in jar}
-                            logger.info(f"Smailpro GMAIL Created Successfully: {email}")
-                            return {
-                                "email": email,
-                                "provider": "smailpro",
-                                "cookies": cookies
-                            }
-            except Exception as err:
-                logger.debug(f"Gmail endpoint {url} failed: {err}")
-                continue
+                async with session.get("https://smailpro.com/temporary-email") as p:
+                    await p.read()
+            except Exception:
+                pass
+
+            endpoints = [
+                "https://api.smailpro.com/v2/client/create?type=google&server=google",
+                "https://api.smailpro.com/v2/email/create?type=google",
+                "https://api.smailpro.com/v2/client/create?type=google"
+            ]
+
+            for url in endpoints:
+                try:
+                    async with session.get(url) as res:
+                        if res.status == 200:
+                            data = await res.json()
+                            email = data.get("address") or data.get("email")
+                            if email and ("@gmail.com" in email or "@googlemail.com" in email):
+                                cookies = {c.key: c.value for c in jar}
+                                logger.info(f"Generated Smailpro Gmail: {email}")
+                                return {"email": email, "provider": "smailpro", "cookies": cookies}
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.warning(f"Engine 1 (Smailpro) error: {e}")
+
+    # --- ENGINE 2: Emailnator Direct Gmail (High-Speed & Reliable) ---
+    try:
+        logger.info("Connecting to Engine 2 for authentic @gmail.com...")
+        jar = aiohttp.CookieJar(unsafe=True)
+        async with aiohttp.ClientSession(cookie_jar=jar, timeout=timeout) as session:
+            # Get CSRF Token
+            en_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Referer": "https://www.emailnator.com/",
+                "Origin": "https://www.emailnator.com"
+            }
+            async with session.get("https://www.emailnator.com/", headers=en_headers) as r:
+                await r.read()
+
+            cookies = {c.key: c.value for c in jar}
+            xsrf = unquote(cookies.get("XSRF-TOKEN", ""))
+
+            post_headers = {
+                **en_headers,
+                "x-xsrf-token": xsrf,
+                "content-type": "application/json"
+            }
+
+            payload = {"email": ["plusGmail", "dotGmail", "gmail"]}
+            async with session.post("https://www.emailnator.com/generate-email", json=payload, headers=post_headers) as res:
+                if res.status == 200:
+                    data = await res.json()
+                    email_list = data.get("email", [])
+                    if email_list:
+                        email = email_list[0]
+                        logger.info(f"Generated Engine 2 Gmail: {email}")
+                        return {"email": email, "provider": "emailnator", "cookies": cookies, "xsrf": xsrf}
+    except Exception as e:
+        logger.error(f"Engine 2 (Emailnator) error: {e}")
 
     return None
 
 
-async def smailpro_check_inbox(session_data: dict):
-    """Checks inbox for incoming Gmail OTPs/Messages using session cookies"""
+async def master_check_inbox(session_data: dict):
+    """Checks Gmail inbox from active provider"""
     if not session_data:
         return []
 
+    provider = session_data.get("provider", "smailpro")
     email = session_data.get("email", "")
-    stored_cookies = session_data.get("cookies", {})
-    jar = aiohttp.CookieJar(unsafe=True)
     timeout = aiohttp.ClientTimeout(total=10)
 
-    async with aiohttp.ClientSession(
-        cookie_jar=jar, headers=SMAILPRO_HEADERS, timeout=timeout
-    ) as session:
-        for key, val in stored_cookies.items():
-            jar.update_cookies({key: val})
+    # Check Smailpro Inbox
+    if provider == "smailpro":
+        stored_cookies = session_data.get("cookies", {})
+        jar = aiohttp.CookieJar(unsafe=True)
+        async with aiohttp.ClientSession(cookie_jar=jar, headers=BROWSER_HEADERS, timeout=timeout) as session:
+            for key, val in stored_cookies.items():
+                jar.update_cookies({key: val})
 
-        inbox_urls = [
-            f"https://api.smailpro.com/v2/client/inbox?email={email}",
-            f"https://api.smailpro.com/v2/email/inbox?email={email}",
-        ]
+            urls = [
+                f"https://api.smailpro.com/v2/client/inbox?email={email}",
+                f"https://api.smailpro.com/v2/email/inbox?email={email}"
+            ]
+            for u in urls:
+                try:
+                    async with session.get(u) as res:
+                        if res.status == 200:
+                            data = await res.json()
+                            msgs = data.get("messages", [])
+                            if isinstance(msgs, list):
+                                return msgs
+                except Exception:
+                    continue
+        return []
 
-        for url in inbox_urls:
-            try:
-                async with session.get(url) as res:
+    # Check Emailnator Inbox
+    elif provider == "emailnator":
+        try:
+            stored_cookies = session_data.get("cookies", {})
+            xsrf = session_data.get("xsrf", "")
+            jar = aiohttp.CookieJar(unsafe=True)
+
+            en_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Referer": "https://www.emailnator.com/",
+                "Origin": "https://www.emailnator.com",
+                "x-xsrf-token": xsrf,
+                "content-type": "application/json"
+            }
+
+            async with aiohttp.ClientSession(cookie_jar=jar, headers=en_headers, timeout=timeout) as session:
+                for k, v in stored_cookies.items():
+                    jar.update_cookies({k: v})
+
+                payload = {"email": email}
+                async with session.post("https://www.emailnator.com/message-list", json=payload) as res:
                     if res.status == 200:
                         data = await res.json()
-                        msgs = data.get("messages", [])
-                        if isinstance(msgs, list):
-                            return msgs
-            except Exception:
-                continue
+                        raw_msgs = data.get("messageData", [])
+                        messages = []
+
+                        for m in raw_msgs:
+                            msg_id = m.get("messageID")
+                            if msg_id and msg_id != "AD_CONTAINER":
+                                # Fetch message content
+                                body_payload = {"email": email, "messageID": msg_id}
+                                async with session.post("https://www.emailnator.com/message-list", json=body_payload) as b_res:
+                                    if b_res.status == 200:
+                                        body_html = await b_res.text()
+                                        clean_text = re.sub(r'<[^>]+>', ' ', body_html).strip()
+                                        messages.append({
+                                            "id": msg_id,
+                                            "from": m.get("from", "Unknown"),
+                                            "subject": m.get("subject", "No Subject"),
+                                            "body": clean_text or body_html
+                                        })
+                        return messages
+        except Exception as e:
+            logger.error(f"Emailnator inbox error: {e}")
 
     return []
-   # ==================== 30-SEC AUTO REFRESH LOOP ====================
+    # ==================== 30-SEC AUTO REFRESH LOOP ====================
 async def auto_refresh_inbox(user_id: int, chat_id: int):
     seen_ids = set()
     logger.info(f"Auto-refresh started for user {user_id}")
@@ -229,7 +298,7 @@ async def auto_refresh_inbox(user_id: int, chat_id: int):
             break
 
         try:
-            messages = await smailpro_check_inbox(session)
+            messages = await master_check_inbox(session)
 
             for msg in messages:
                 msg_id = str(msg.get("id") or (msg.get("subject", "") + msg.get("from", "")))
@@ -243,7 +312,6 @@ async def auto_refresh_inbox(user_id: int, chat_id: int):
                     # Clickable links extract karna
                     urls = extract_urls(body)
 
-                    # Message Body (HTML Escaped)
                     msg_text = (
                         f"📩 <b>New Gmail Received!</b>\n\n"
                         f"👤 <b>From:</b> {html.escape(str(sender))}\n"
@@ -251,9 +319,9 @@ async def auto_refresh_inbox(user_id: int, chat_id: int):
                         f"📝 <b>Content:</b>\n{html.escape(str(body))}"
                     )
 
-                    # Links ko bina mono ke plain clickable URL banana
+                    # Links plain clickable format mein (no mono)
                     if urls:
-                        links_text = "\n\n🔗 <b>Links:</b>\n"
+                        links_text = "\n\n🔗 <b>Links Found:</b>\n"
                         for i, url in enumerate(urls, 1):
                             links_text += f"\n{i}. {url}"
                         msg_text += links_text
@@ -272,7 +340,7 @@ async def auto_refresh_inbox(user_id: int, chat_id: int):
                         save_db(db)
 
         except Exception as e:
-            logger.error(f"Auto-refresh loop error for {user_id}: {e}")
+            logger.error(f"Auto-refresh error for {user_id}: {e}")
 
         await asyncio.sleep(30)
 
@@ -306,7 +374,7 @@ async def start_handler(message: types.Message):
     if is_new:
         text = (
             f"👋 <b>Welcome, {mention}!</b>\n\n"
-            f"Thank you for starting the <b>Smailpro Gmail Bot</b>! 🎉\n\n"
+            f"Thank you for starting the <b>Gmail Temp Mail Bot</b>! 🎉\n\n"
             f"⚡ <b>Available Actions:</b>\n"
             f"🟢 <b>Create New Mail</b> — Generate a fresh @gmail.com address\n"
             f"🔵 <b>Check Inbox</b> — Read incoming emails & OTPs\n"
@@ -332,17 +400,18 @@ async def create_mail_handler(message: types.Message):
         return
 
     register_user(user)
-    status_msg = await message.answer("⏳ <i>Generating fresh @gmail.com address from Smailpro...</i>")
+    status_msg = await message.answer("⏳ <i>Generating fresh @gmail.com address...</i>")
 
-    mail_data = await smailpro_create_gmail()
+    mail_data = await master_create_gmail()
 
     if mail_data:
         stop_auto_refresh(user.id)
 
         user_mail_sessions[user.id] = {
             "email": mail_data["email"],
-            "provider": "smailpro",
+            "provider": mail_data["provider"],
             "cookies": mail_data.get("cookies", {}),
+            "xsrf": mail_data.get("xsrf", ""),
             "created_at": datetime.now().isoformat()
         }
 
@@ -355,17 +424,17 @@ async def create_mail_handler(message: types.Message):
             save_db(db)
 
         await status_msg.edit_text(
-            f"✅ <b>Your Smailpro Gmail is Ready:</b>\n\n"
+            f"✅ <b>Your Gmail is Ready:</b>\n\n"
             f"<code>{email}</code>\n\n"
             f"📋 <i>Tap the email above to copy it.</i>\n"
-            f"🔄 <b>Auto-Refresh Active:</b> Checking every 30 seconds automatically.\n"
-            f"♾️ <b>Unlimited:</b> Fresh session used (no limit lock)!\n\n"
+            f"🔄 <b>Auto-Refresh Active:</b> Checking every 30 seconds.\n"
+            f"♾️ <b>Unlimited:</b> Fresh session used!\n\n"
             f"You can also tap 🔵 <b>Check Inbox</b> anytime."
         )
 
         start_auto_refresh(user.id, message.chat.id)
     else:
-        await status_msg.edit_text("❌ <b>Failed to generate Gmail.</b> Smailpro server busy, please try again in a few seconds.")
+        await status_msg.edit_text("❌ <b>Failed to generate Gmail.</b> Server busy, please try again in a few seconds.")
 
 
 @dp.message(F.text == "🔵 Check Inbox")
@@ -384,7 +453,7 @@ async def check_inbox_handler(message: types.Message):
     email = session["email"]
     status_msg = await message.answer(f"🔍 <i>Checking inbox for:</i> <code>{email}</code>")
 
-    messages = await smailpro_check_inbox(session)
+    messages = await master_check_inbox(session)
 
     if not messages:
         await status_msg.edit_text(
@@ -673,7 +742,7 @@ async def export_handler(message: types.Message):
 async def handle_home(request):
     return web.json_response({
         "status": "online",
-        "service": "Smailpro Gmail Bot",
+        "service": "Gmail Temp Bot",
         "users": len(db["users"]),
         "sessions": len(user_mail_sessions)
     })
@@ -705,4 +774,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    asyncio.run(main())

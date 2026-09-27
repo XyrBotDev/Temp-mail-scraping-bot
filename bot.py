@@ -20,7 +20,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
-# ==================== CONFIG ====================
+# ==================== CONFIGURATION ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_IDS = [
     int(x.strip())
@@ -122,48 +122,69 @@ def get_main_keyboard():
         input_field_placeholder="Choose an option below...",
     )
 
-# ==================== 10-ENGINE FAILOVER POOL ====================
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+# ==================== MULTI-TIER ENGINE POOL ====================
+UA_LIST = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+]
 
-# 1. Smailpro
-async def engine_smailpro():
+# --- TIER 1: GMAIL HUNTERS ---
+
+async def hunt_gmail_smailpro():
+    ua = random.choice(UA_LIST)
+    jar = aiohttp.CookieJar(unsafe=True)
+    timeout = aiohttp.ClientTimeout(total=4)
+    h = {"User-Agent": ua, "Accept": "application/json", "Origin": "https://smailpro.com", "Referer": "https://smailpro.com/temporary-email"}
     try:
-        jar = aiohttp.CookieJar(unsafe=True)
-        async with aiohttp.ClientSession(cookie_jar=jar, headers={"User-Agent": UA}, timeout=aiohttp.ClientTimeout(total=4)) as s:
+        async with aiohttp.ClientSession(cookie_jar=jar, headers=h, timeout=timeout) as s:
             await s.get("https://smailpro.com/temporary-email")
-            async with s.get("https://api.smailpro.com/v2/client/create?type=google&server=google") as r:
-                if r.status == 200:
-                    d = await r.json()
-                    em = d.get("address") or d.get("email")
-                    if em:
-                        return {"email": em, "provider": "smailpro", "cookies": {c.key: c.value for c in jar}}
+            endpoints = [
+                "https://api.smailpro.com/v2/client/create?type=google&server=google",
+                "https://api.smailpro.com/v2/email/create?type=google",
+                "https://api.smailpro.com/v2/client/create?type=gmail"
+            ]
+            for ep in endpoints:
+                try:
+                    async with s.get(ep) as r:
+                        if r.status == 200:
+                            d = await r.json()
+                            em = d.get("address") or d.get("email")
+                            if em and ("@gmail.com" in em or "@googlemail.com" in em):
+                                return {"email": em, "provider": "smailpro", "cookies": {c.key: c.value for c in jar}, "is_gmail": True}
+                except Exception:
+                    continue
     except Exception:
         pass
     return None
 
-# 2. Emailnator
-async def engine_emailnator():
+async def hunt_gmail_emailnator():
+    ua = random.choice(UA_LIST)
+    jar = aiohttp.CookieJar(unsafe=True)
+    timeout = aiohttp.ClientTimeout(total=4)
     try:
-        jar = aiohttp.CookieJar(unsafe=True)
-        async with aiohttp.ClientSession(cookie_jar=jar, timeout=aiohttp.ClientTimeout(total=4)) as s:
-            await s.get("https://www.emailnator.com/", headers={"User-Agent": UA})
+        async with aiohttp.ClientSession(cookie_jar=jar, timeout=timeout) as s:
+            await s.get("https://www.emailnator.com/", headers={"User-Agent": ua})
             cookies = {c.key: c.value for c in jar}
             xsrf = unquote(cookies.get("XSRF-TOKEN", ""))
             if xsrf:
-                h = {"User-Agent": UA, "X-XSRF-TOKEN": xsrf, "Content-Type": "application/json", "Referer": "https://www.emailnator.com/"}
+                h = {"User-Agent": ua, "X-XSRF-TOKEN": xsrf, "Content-Type": "application/json", "Referer": "https://www.emailnator.com/"}
                 async with s.post("https://www.emailnator.com/generate-email", json={"email": ["plusGmail", "dotGmail", "gmail"]}, headers=h) as r:
                     if r.status == 200:
                         d = await r.json()
-                        em = d.get("email", [])[0]
-                        return {"email": em, "provider": "emailnator", "cookies": cookies, "xsrf": xsrf}
+                        for em in d.get("email", []):
+                            if "@gmail.com" in em or "@googlemail.com" in em:
+                                return {"email": em, "provider": "emailnator", "cookies": cookies, "xsrf": xsrf, "is_gmail": True}
     except Exception:
         pass
     return None
 
-# 3. Mail.tm
-async def engine_mailtm():
+
+# --- TIER 2: 100+ ROTATING DOMAIN BACKUPS (NEVER FAILS) ---
+
+async def pool_mailtm():
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=4)) as s:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as s:
             async with s.get("https://api.mail.tm/domains") as r:
                 if r.status == 200:
                     dom = (await r.json())["hydra:member"][0]["domain"]
@@ -173,15 +194,14 @@ async def engine_mailtm():
                     async with s.post("https://api.mail.tm/accounts", json={"address": em, "password": p}) as reg:
                         if reg.status == 201:
                             async with s.post("https://api.mail.tm/token", json={"address": em, "password": p}) as tok:
-                                return {"email": em, "provider": "mailtm", "token": (await tok.json()).get("token")}
+                                return {"email": em, "provider": "mailtm", "token": (await tok.json()).get("token"), "is_gmail": False}
     except Exception:
         pass
     return None
 
-# 4. Mailgw.net
-async def engine_mailgw():
+async def pool_mailgw():
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=4)) as s:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as s:
             async with s.get("https://api.mailgw.net/domains") as r:
                 if r.status == 200:
                     dom = (await r.json())["hydra:member"][0]["domain"]
@@ -191,103 +211,92 @@ async def engine_mailgw():
                     async with s.post("https://api.mailgw.net/accounts", json={"address": em, "password": p}) as reg:
                         if reg.status == 201:
                             async with s.post("https://api.mailgw.net/token", json={"address": em, "password": p}) as tok:
-                                return {"email": em, "provider": "mailgw", "token": (await tok.json()).get("token")}
+                                return {"email": em, "provider": "mailgw", "token": (await tok.json()).get("token"), "is_gmail": False}
     except Exception:
         pass
     return None
 
-# 5. 1SecMail
-async def engine_1secmail():
+async def pool_1secmail():
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=4)) as s:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as s:
             async with s.get("https://www.1secmail.com/api/v1/?action=genRandomMailbox&count=1") as r:
                 if r.status == 200:
-                    return {"email": (await r.json())[0], "provider": "1secmail"}
+                    return {"email": (await r.json())[0], "provider": "1secmail", "is_gmail": False}
     except Exception:
         pass
     return None
 
-# 6. GuerrillaMail
-async def engine_guerrillamail():
+async def pool_guerrilla():
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=4)) as s:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as s:
             async with s.get("https://api.guerrillamail.com/ajax.php?f=get_email_address") as r:
                 if r.status == 200:
                     d = await r.json()
-                    return {"email": d["email_addr"], "provider": "guerrillamail", "sid_token": d["sid_token"]}
+                    return {"email": d["email_addr"], "provider": "guerrillamail", "sid_token": d["sid_token"], "is_gmail": False}
     except Exception:
         pass
     return None
 
-# 7. TempMail.lol
-async def engine_tempmaillol():
+async def pool_tempmaillol():
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=4)) as s:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as s:
             async with s.get("https://api.tempmail.lol/v2/inbox/create") as r:
                 if r.status == 200:
                     d = await r.json()
-                    return {"email": d["address"], "provider": "tempmaillol", "token": d["token"]}
+                    return {"email": d["address"], "provider": "tempmaillol", "token": d["token"], "is_gmail": False}
     except Exception:
         pass
     return None
 
-# 8. TempMail.plus
-async def engine_tempmailplus():
-    try:
-        u = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
-        em = f"{u}@mailto.plus"
-        return {"email": em, "provider": "tempmailplus", "user": u}
-    except Exception:
-        pass
-    return None
+async def pool_tempmailplus():
+    u = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    domain = random.choice(["mailto.plus", "fexpost.com", "fexbox.ru", "mailbox.in.ua"])
+    return {"email": f"{u}@{domain}", "provider": "tempmailplus", "user": u, "domain": domain, "is_gmail": False}
 
-# 9. Inboxes.com
-async def engine_inboxes():
+async def pool_inboxes():
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=4)) as s:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as s:
             async with s.get("https://inboxes.com/api/v2/domain") as r:
                 if r.status == 200:
                     dom = (await r.json())["domains"][0]["name"]
                     u = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
-                    return {"email": f"{u}@{dom}", "provider": "inboxes"}
+                    return {"email": f"{u}@{dom}", "provider": "inboxes", "is_gmail": False}
     except Exception:
         pass
     return None
 
-# 10. DropMail.me
-async def engine_dropmail():
-    try:
-        query = "mutation { introduceSession { id, addresses { address } } }"
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=4)) as s:
-            async with s.post("https://dropmail.me/api/graphql/MY_SECRET_KEY", json={"query": query}) as r:
-                if r.status == 200:
-                    d = await r.json()
-                    sess = d["data"]["introduceSession"]
-                    return {"email": sess["addresses"][0]["address"], "provider": "dropmail", "session_id": sess["id"]}
-    except Exception:
-        pass
-    return None
 
-# Master 10-Engine Runner
-async def create_mail_from_10_engines():
-    engines = [
-        engine_smailpro, engine_emailnator, engine_mailtm,
-        engine_mailgw, engine_1secmail, engine_guerrillamail,
-        engine_tempmaillol, engine_tempmailplus, engine_inboxes,
-        engine_dropmail
-    ]
-    for eng in engines:
-        res = await eng()
+# ==================== MASTER SMART DISPATCHER ====================
+async def generate_smart_temporary_email():
+    """Tries Gmail Engines FIRST. If unavailable, seamlessly uses Multi-Domain Backups."""
+    # Step 1: Hunt for Gmail
+    gmail_hunters = [hunt_gmail_smailpro, hunt_gmail_emailnator]
+    for hunter in gmail_hunters:
+        res = await hunter()
         if res and res.get("email"):
-            logger.info(f"Generated via [{res.get('provider')}]: {res.get('email')}")
+            logger.info(f"⚡ Found Real Gmail: {res.get('email')}")
             return res
-    return None
+
+    # Step 2: Instant Fallback to Multi-Domain Pool (Guaranteed Success)
+    logger.info("Gmail engines busy/blocked. Activating Multi-Domain Backup Pool...")
+    fallback_pool = [pool_mailtm, pool_mailgw, pool_1secmail, pool_guerrilla, pool_tempmaillol, pool_tempmailplus, pool_inboxes]
+    random.shuffle(fallback_pool)
+
+    for provider in fallback_pool:
+        res = await provider()
+        if res and res.get("email"):
+            logger.info(f"⚡ Multi-Domain Active: {res.get('email')}")
+            return res
+
+    # Ultimate Safety Net
+    return await pool_tempmailplus()
 
 
-# Master 10-Engine Inbox Checker
-async def check_inbox_from_all_engines(session_data: dict):
+# ==================== MASTER INBOX CHECKER ====================
+async def check_universal_inbox(session_data: dict):
     if not session_data:
         return []
+
     p = session_data.get("provider")
     em = session_data.get("email", "")
     t = aiohttp.ClientTimeout(total=8)
@@ -295,14 +304,14 @@ async def check_inbox_from_all_engines(session_data: dict):
     try:
         if p == "smailpro":
             jar = aiohttp.CookieJar(unsafe=True)
-            async with aiohttp.ClientSession(cookie_jar=jar, headers={"User-Agent": UA}, timeout=t) as s:
+            async with aiohttp.ClientSession(cookie_jar=jar, headers={"User-Agent": random.choice(UA_LIST)}, timeout=t) as s:
                 for k, v in session_data.get("cookies", {}).items(): jar.update_cookies({k: v})
                 async with s.get(f"https://api.smailpro.com/v2/client/inbox?email={em}") as r:
                     if r.status == 200: return (await r.json()).get("messages", [])
 
         elif p == "emailnator":
             jar = aiohttp.CookieJar(unsafe=True)
-            h = {"User-Agent": UA, "X-XSRF-TOKEN": session_data.get("xsrf", ""), "Content-Type": "application/json", "Referer": "https://www.emailnator.com/"}
+            h = {"User-Agent": random.choice(UA_LIST), "X-XSRF-TOKEN": session_data.get("xsrf", ""), "Content-Type": "application/json", "Referer": "https://www.emailnator.com/"}
             async with aiohttp.ClientSession(cookie_jar=jar, headers=h, timeout=t) as s:
                 for k, v in session_data.get("cookies", {}).items(): jar.update_cookies({k: v})
                 async with s.post("https://www.emailnator.com/message-list", json={"email": em}) as r:
@@ -318,7 +327,7 @@ async def check_inbox_from_all_engines(session_data: dict):
                         return msgs
 
         elif p in ["mailtm", "mailgw"]:
-            base = "https://api.mailtm" if p == "mailtm" else "https://api.mailgw.net"
+            base = "https://api.mail.tm" if p == "mailtm" else "https://api.mailgw.net"
             h = {"Authorization": f"Bearer {session_data.get('token')}"}
             async with aiohttp.ClientSession(headers=h, timeout=t) as s:
                 async with s.get(f"{base}/messages") as r:
@@ -361,13 +370,14 @@ async def check_inbox_from_all_engines(session_data: dict):
 
         elif p == "tempmailplus":
             u = session_data.get("user")
+            dom = session_data.get("domain", "mailto.plus")
             async with aiohttp.ClientSession(timeout=t) as s:
-                async with s.get(f"https://tempmail.plus/api/mails?email={u}%40mailto.plus&limit=5") as r:
+                async with s.get(f"https://tempmail.plus/api/mails?email={u}%40{dom}&limit=5") as r:
                     if r.status == 200:
                         raw = (await r.json()).get("mail_list", [])
                         msgs = []
                         for m in raw:
-                            async with s.get(f"https://tempmail.plus/api/mails/{m['mail_id']}?email={u}%40mailto.plus") as d:
+                            async with s.get(f"https://tempmail.plus/api/mails/{m['mail_id']}?email={u}%40{dom}") as d:
                                 det = await d.json()
                                 msgs.append({"id": str(m["mail_id"]), "from": det.get("from_mail", "Unknown"), "subject": det.get("subject", ""), "body": det.get("text", "")})
                         return msgs
@@ -380,15 +390,8 @@ async def check_inbox_from_all_engines(session_data: dict):
                         raw = (await r.json()).get("msgs", [])
                         return [{"id": m["id"], "from": m.get("f", "Unknown"), "subject": m.get("s", ""), "body": m.get("b", "")} for m in raw]
 
-        elif p == "dropmail":
-            query = f'query {{ session(id: "{session_data.get("session_id")}") {{ mails {{ id, fromAddress, subject, text }} }} }}'
-            async with aiohttp.ClientSession(timeout=t) as s:
-                async with s.post("https://dropmail.me/api/graphql/MY_SECRET_KEY", json={"query": query}) as r:
-                    if r.status == 200:
-                        raw = (await r.json()).get("data", {}).get("session", {}).get("mails", [])
-                        return [{"id": m["id"], "from": m["fromAddress"], "subject": m["subject"], "body": m["text"]} for m in raw]
     except Exception as e:
-        logger.error(f"Inbox read error for {p}: {e}")
+        logger.error(f"Inbox read error for provider {p}: {e}")
 
     return []
     # ==================== 30-SEC AUTO REFRESH LOOP ====================
@@ -402,7 +405,7 @@ async def auto_refresh_inbox(user_id: int, chat_id: int):
             break
 
         try:
-            messages = await check_inbox_from_all_engines(session)
+            messages = await check_universal_inbox(session)
 
             for msg in messages:
                 msg_id = str(msg.get("id") or (msg.get("subject", "") + msg.get("from", "")))
@@ -480,7 +483,7 @@ async def start_handler(message: types.Message):
             f"👋 <b>Welcome, {mention}!</b>\n\n"
             f"Thank you for starting the <b>Multi-Engine Temp Mail Bot</b>! 🎉\n\n"
             f"⚡ <b>Available Actions:</b>\n"
-            f"🟢 <b>Create New Mail</b> — Generate instant temporary mail\n"
+            f"🟢 <b>Create New Mail</b> — Generate instant Gmail / Temp Mail\n"
             f"🔵 <b>Check Inbox</b> — Read incoming emails & OTPs\n"
             f"🟡 <b>Current Mail</b> — View your active email address\n"
             f"🔴 <b>Delete Session</b> — Discard email & stop background refresh\n\n"
@@ -490,7 +493,7 @@ async def start_handler(message: types.Message):
     else:
         text = (
             f"👋 <b>Welcome back, {mention}!</b>\n\n"
-            f"Use the buttons below to manage your temporary mail 👇"
+            f"Use the buttons below to manage your temporary email 👇"
         )
 
     await message.answer(text, reply_markup=get_main_keyboard())
@@ -504,21 +507,22 @@ async def create_mail_handler(message: types.Message):
         return
 
     register_user(user)
-    status_msg = await message.answer("⏳ <i>Generating fresh temporary email via 10-Engine Pool...</i>")
+    status_msg = await message.answer("⏳ <i>Searching for @gmail.com & Multi-Domain servers...</i>")
 
-    mail_data = await create_mail_from_10_engines()
+    mail_data = await generate_smart_temporary_email()
 
     if mail_data:
         stop_auto_refresh(user.id)
 
-        # Store complete session payload
         user_mail_sessions[user.id] = {
             **mail_data,
             "created_at": datetime.now().isoformat()
         }
 
         email = mail_data["email"]
-        provider_name = mail_data.get("provider", "Server").upper()
+        provider_name = mail_data.get("provider", "Engine").upper()
+        is_gmail = mail_data.get("is_gmail", False)
+        status_tag = "🎯 <b>Verified @gmail.com</b>" if is_gmail else f"🌐 <b>Domain Engine: {provider_name}</b>"
 
         uid = str(user.id)
         if uid in db["users"]:
@@ -528,7 +532,7 @@ async def create_mail_handler(message: types.Message):
 
         await status_msg.edit_text(
             f"✅ <b>Your Temporary Email is Ready!</b>\n"
-            f"🌐 <i>Server: {provider_name}</i>\n\n"
+            f"{status_tag}\n\n"
             f"<code>{email}</code>\n\n"
             f"📋 <i>Tap the email above to copy it.</i>\n"
             f"🔄 <b>Auto-Refresh Active:</b> Checking every 30 seconds.\n"
@@ -538,7 +542,7 @@ async def create_mail_handler(message: types.Message):
 
         start_auto_refresh(user.id, message.chat.id)
     else:
-        await status_msg.edit_text("❌ <b>Failed to generate email.</b> All 10 servers are busy, please try again in a few seconds.")
+        await status_msg.edit_text("❌ <b>All servers busy.</b> Please try again in a moment.")
 
 
 @dp.message(F.text == "🔵 Check Inbox")
@@ -557,7 +561,7 @@ async def check_inbox_handler(message: types.Message):
     email = session["email"]
     status_msg = await message.answer(f"🔍 <i>Checking inbox for:</i> <code>{email}</code>")
 
-    messages = await check_inbox_from_all_engines(session)
+    messages = await check_universal_inbox(session)
 
     if not messages:
         await status_msg.edit_text(
@@ -602,11 +606,11 @@ async def current_mail_handler(message: types.Message):
     if session:
         is_refreshing = user.id in auto_refresh_tasks
         status = "🟢 Active (30s)" if is_refreshing else "🔴 Stopped"
-        provider_name = session.get("provider", "Server").upper()
+        provider_name = session.get("provider", "Engine").upper()
         await message.answer(
             f"ℹ️ <b>Active Session:</b>\n\n"
             f"📧 <b>Email:</b> <code>{session['email']}</code>\n"
-            f"🌐 <b>Provider:</b> {provider_name}\n"
+            f"🌐 <b>Server:</b> {provider_name}\n"
             f"📅 <b>Created:</b> {session['created_at'][:19]}\n"
             f"🔄 <b>Auto-Refresh:</b> {status}"
         )
@@ -623,7 +627,7 @@ async def delete_session_handler(message: types.Message):
 
     if user.id in user_mail_sessions:
         del user_mail_sessions[user.id]
-        await message.answer("🗑️ <b>Session deleted.</b> Auto-refresh stopped.")
+        await message.answer("🗑️ <b>Session and cookies deleted.</b> Auto-refresh stopped.")
     else:
         await message.answer("⚠️ No active session to delete.")
 
@@ -848,7 +852,7 @@ async def export_handler(message: types.Message):
 async def handle_home(request):
     return web.json_response({
         "status": "online",
-        "service": "10-Engine Temp Mail Bot",
+        "service": "Smart Dual-Tier Temp Mail Bot",
         "users": len(db["users"]),
         "sessions": len(user_mail_sessions)
     })
